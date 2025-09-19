@@ -52,3 +52,8 @@ src/__pycache__/
 *.pyc
 outputs/
 saved_models/
+
+# Runs folder (trained models and graphs)
+runs/
+runs/**/*.pkl
+runs/**/*.png

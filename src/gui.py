@@ -355,22 +355,76 @@ class MLPVisualizer(QMainWindow):
                 self.learning_rate.setText(str(self.mlp.learning_rate))
                 self.activation_combo.setCurrentText(self.mlp.activation_name)
                 
-                # Atualizar visualização
-                self._update_graph(show_weights=True)
+                # Testar o modelo após carregar
+                self._test_model()
             except Exception as e:
                 self.log_area.append(f"Erro ao carregar modelo: {str(e)}")
+                return
     
     def _test_model(self):
-        """Testa o modelo com um novo dataset"""
+        """Testa o modelo com dados de treino e teste"""
         if self.mlp is None:
             self.log_area.append("Por favor, crie ou carregue uma rede primeiro!")
             return
+            
+        if self.df is None:
+            # Se não houver dados carregados, pedir novo arquivo
+            file_path, _ = QFileDialog.getOpenFileName(
+                self, "Selecionar arquivo CSV para teste", "", "CSV Files (*.csv)")
+            
+            if not file_path:
+                return
+                
+            try:
+                self.df = pd.read_csv(file_path)
+            except Exception as e:
+                self.log_area.append(f"Erro ao carregar CSV: {str(e)}")
+                return
         
-        # Carregar arquivo de teste
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "Selecionar arquivo CSV para teste", "", "CSV Files (*.csv)")
-        
-        if file_path:
+        try:
+            # Preparar dados
+            input_cols = [col.strip() for col in self.input_cols_list.toPlainText().split(',') if col.strip()]
+            output_cols = [col.strip() for col in self.output_cols_list.toPlainText().split(',') if col.strip()]
+            
+            if not input_cols or not output_cols:
+                self.log_area.append("Por favor, selecione as colunas de entrada e saída!")
+                return
+            
+            # Converter dados para tensor
+            X = torch.tensor(self.df[input_cols].values, dtype=torch.float32)
+            y = torch.tensor(self.df[output_cols].values, dtype=torch.float32)
+            
+            # Pré-processamento
+            if self.standardize.isChecked():
+                X = (X - X.mean(dim=0)) / X.std(dim=0)
+                y = (y - y.mean(dim=0)) / y.std(dim=0)
+            elif self.normalize.isChecked():
+                X = (X - X.min(dim=0)[0]) / (X.max(dim=0)[0] - X.min(dim=0)[0])
+                y = (y - y.min(dim=0)[0]) / (y.max(dim=0)[0] - y.min(dim=0)[0])
+            
+            # Split treino/teste
+            train_size = int(len(X) * self.train_split.value() / 100)
+            indices = torch.randperm(len(X))
+            
+            train_indices = indices[:train_size]
+            test_indices = indices[train_size:]
+            
+            X_train, y_train = X[train_indices], y[train_indices]
+            X_test, y_test = X[test_indices], y[test_indices]
+            
+            # Avaliar no conjunto de treino
+            train_loss, train_accuracy = self.mlp.evaluate(X_train, y_train)
+            self.log_area.setText(f"Acurácia no conjunto de treino: {train_accuracy:.2%}")
+            
+            # Avaliar no conjunto de teste
+            test_loss, test_accuracy = self.mlp.evaluate(X_test, y_test)
+            self.log_area.append(f"\nAcurácia no conjunto de teste: {test_accuracy:.2%}")
+            
+            # Atualizar visualização da rede
+            self._update_graph(show_weights=True, title=f"Acurácia Treino: {train_accuracy:.2%}\nAcurácia Teste: {test_accuracy:.2%}")
+            
+        except Exception as e:
+            self.log_area.append(f"Erro durante o teste: {str(e)}")
             try:
                 # Carregar dados
                 test_df = pd.read_csv(file_path)
@@ -425,12 +479,8 @@ class MLPVisualizer(QMainWindow):
     
     def _on_training_update(self, phase, outputs, loss, activations=None):
         """Callback chamado durante o treinamento para atualizar a visualização"""
-        # Atualizar apenas após o backward pass (fim da época)
-        if phase == 'backward':
-            # Atualizar visualização com os pesos e ativações
-            self._update_graph(show_weights=True, activations=activations)
-            self.canvas.draw()
-            QApplication.processEvents()
+        # Não fazer nada durante os batches, a atualização será feita ao final da época
+        pass
     
     def train_network(self):
         if self.mlp is None:
@@ -485,9 +535,9 @@ class MLPVisualizer(QMainWindow):
             # Treinar rede e coletar histórico de loss
             losses = []
             best_loss = float('inf')
-            patience = 10  # Número de épocas para esperar por melhoria
+            patience = 30  # Número de épocas para esperar por melhoria
             patience_counter = 0
-            min_delta = 0.001  # Mínima mudança considerada como melhoria
+            min_delta = 0.0001  # Mínima mudança considerada como melhoria
             
             self.log_area.append(f"Iniciando treinamento com {epochs} épocas...")
             
@@ -526,23 +576,26 @@ class MLPVisualizer(QMainWindow):
                 status_msg = f"Época {epoch+1}/{epochs} - Loss: {epoch_loss:.4f}"
                 print(f"\r{status_msg}", end="", flush=True)  # Mostrar no terminal
                 self.log_area.setText(status_msg)  # Apenas época e loss atual
-                # Atualizar título do gráfico com a época e loss atual
-                self.ax_network.set_title(status_msg, fontsize=12, pad=10)
-                # Atualizar visualização da rede com os pesos atuais
-                self._update_graph(show_weights=True)
-                self.canvas.draw()
+                self.loss_label.setText(f"Loss: {epoch_loss:.4f}")
+                
+                # Atualizar visualização da rede
+                self._update_graph(
+                    show_weights=True,
+                    title=f"Época {epoch+1}/{epochs}\nLoss: {epoch_loss:.4f}"
+                )
                 
                 # Early stopping
                 if patience_counter >= patience:
-                    self.log_area.setText(f"Early stopping na época {epoch+1} - Loss não melhorou por {patience} épocas")
+                    print(f"\nEarly stopping na época {epoch+1} - Loss não melhorou por {patience} épocas")
                     break
             
             # Avaliar no conjunto de treino e teste
             train_loss, train_accuracy = self.mlp.evaluate(X_train, y_train)
             test_loss, test_accuracy = self.mlp.evaluate(X_test, y_test)
             
-            # Atualizar visualização final com os resultados
-            final_status = f"Treinamento concluído - Loss final: {test_loss:.4f}"
+            # Atualizar visualização final apenas com as acurácias
+            final_status = f"Acurácia Final:\nTreino: {train_accuracy:.2%}\nTeste: {test_accuracy:.2%}"
+            print(f"\n{final_status}")
             self.log_area.setText(final_status)
             
             # Criar pasta para esta execução
@@ -557,9 +610,18 @@ class MLPVisualizer(QMainWindow):
             run_dir = os.path.join(runs_dir, f'run_{next_run}')
             os.makedirs(run_dir)
             
-            # Salvar gráfico de loss
+            # Salvar gráfico de loss vs época
+            loss_fig = plt.figure(figsize=(10, 6))
+            plt.plot(losses, 'b-', label='Loss', linewidth=2)
+            plt.xlabel('Época', fontsize=12)
+            plt.ylabel('Loss', fontsize=12)
+            plt.title('Curva de Aprendizado', fontsize=14)
+            plt.grid(True, linestyle='--', alpha=0.7)
+            plt.legend(fontsize=10)
+            
             loss_path = os.path.join(run_dir, 'loss_history.png')
-            plt.savefig(loss_path, dpi=300, bbox_inches='tight')
+            loss_fig.savefig(loss_path, dpi=300, bbox_inches='tight')
+            plt.close(loss_fig)  # Fechar figura para liberar memória
             self.log_area.append(f"\nGráfico de loss salvo em: {loss_path}")
             
             # Salvar modelo se selecionado
@@ -600,7 +662,7 @@ class MLPVisualizer(QMainWindow):
         except Exception as e:
             self.log_area.append(f"Erro durante o treinamento: {str(e)}")
     
-    def _update_graph(self, show_weights=False, activations=None, phase='forward'):
+    def _update_graph(self, show_weights=False, activations=None, phase='forward', title=None):
         self.ax_network.clear()
         
         if self.mlp is None:
@@ -693,14 +755,15 @@ class MLPVisualizer(QMainWindow):
                                        ax=self.ax_network, font_size=9,
                                        bbox=dict(facecolor='white', edgecolor='none', alpha=0.7))
         
-        # Adicionar título com a loss atual
-        if hasattr(self, 'loss_label'):
-            current_loss = self.loss_label.text().replace('Loss atual: ', '')
-            self.ax_network.set_title(f"Neural Network Graph (Loss: {current_loss})")
+        # Adicionar título informativo
+        if title:
+            self.ax_network.set_title(title, fontsize=12, pad=10)
         else:
-            self.ax_network.set_title("Neural Network Graph")
+            self.ax_network.set_title("Neural Network Graph", fontsize=12, pad=10)
         
         # Remover eixos
         self.ax_network.set_axis_off()
         
+        # Forçar atualização do canvas
         self.canvas.draw()
+        QApplication.processEvents()
