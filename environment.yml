@@ -1,0 +1,15 @@
+name: mlp-graph-new
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - numpy
+  - pandas
+  - pytorch
+  - matplotlib
+  - networkx
+  - pyqt=5
+  - pip
+  - pip:
+    - torchviz
