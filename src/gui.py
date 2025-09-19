@@ -1,4 +1,5 @@
 import sys
+import os
 import numpy as np
 import pandas as pd
 import torch
@@ -282,23 +283,25 @@ class MLPVisualizer(QMainWindow):
         layout = QVBoxLayout(central_widget)
         
         # Criar figura para o gráfico de loss
-        fig = plt.figure(figsize=(8, 6))
+        fig = plt.figure(figsize=(10, 6))
         ax = fig.add_subplot(111)
         
         # Plotar curva de loss
-        ax.plot(losses, 'b-', label='Loss')
-        ax.set_xlabel('Época')
-        ax.set_ylabel('Loss')
-        ax.set_title('Curva de Aprendizado')
-        ax.grid(True)
-        ax.legend()
+        ax.plot(losses, 'b-', label='Loss', linewidth=2)
+        ax.set_xlabel('Época', fontsize=12)
+        ax.set_ylabel('Loss', fontsize=12)
+        ax.set_title('Curva de Aprendizado', fontsize=14)
+        ax.grid(True, linestyle='--', alpha=0.7)
+        ax.legend(fontsize=10)
         
         # Criar canvas e adicionar ao layout
         canvas = FigureCanvas(fig)
         layout.addWidget(canvas)
         
+        # Gráfico será salvo ao final do treinamento na pasta específica
+        
         loss_window.setCentralWidget(central_widget)
-        loss_window.resize(600, 400)
+        loss_window.resize(800, 500)
         loss_window.show()
     
     def _create_network(self):
@@ -422,30 +425,12 @@ class MLPVisualizer(QMainWindow):
     
     def _on_training_update(self, phase, outputs, loss, activations=None):
         """Callback chamado durante o treinamento para atualizar a visualização"""
-        if phase == 'forward':
-            # Animar forward pass nó por nó rapidamente
-            temp_activations = {}
-            for layer_idx in range(len(self.mlp.graph.layers)):
-                for node in self.mlp.graph.layers[layer_idx]:
-                    if node.id in activations:
-                        temp_activations[node.id] = activations[node.id]
-                        self._update_graph(show_weights=True, activations=temp_activations, phase=phase)
-                        self.canvas.draw()
-                        QApplication.processEvents()
-                        import time
-                        time.sleep(0.02)  # Pausa mais curta
-        else:
-            # Animar backward pass nó por nó rapidamente
-            temp_activations = {}
-            for layer_idx in range(len(self.mlp.graph.layers)-1, -1, -1):
-                for node in self.mlp.graph.layers[layer_idx]:
-                    if node.id in activations:
-                        temp_activations[node.id] = activations[node.id]
-                        self._update_graph(show_weights=True, activations=temp_activations, phase=phase)
-                        self.canvas.draw()
-                        QApplication.processEvents()
-                        import time
-                        time.sleep(0.02)  # Pausa mais curta
+        # Atualizar apenas após o backward pass (fim da época)
+        if phase == 'backward':
+            # Atualizar visualização com os pesos e ativações
+            self._update_graph(show_weights=True, activations=activations)
+            self.canvas.draw()
+            QApplication.processEvents()
     
     def train_network(self):
         if self.mlp is None:
@@ -499,6 +484,11 @@ class MLPVisualizer(QMainWindow):
             
             # Treinar rede e coletar histórico de loss
             losses = []
+            best_loss = float('inf')
+            patience = 10  # Número de épocas para esperar por melhoria
+            patience_counter = 0
+            min_delta = 0.001  # Mínima mudança considerada como melhoria
+            
             self.log_area.append(f"Iniciando treinamento com {epochs} épocas...")
             
             # Treinar a rede com visualização em tempo real
@@ -525,31 +515,59 @@ class MLPVisualizer(QMainWindow):
                 epoch_loss /= num_batches
                 losses.append(epoch_loss)
                 
+                # Early stopping check
+                if epoch_loss < best_loss - min_delta:
+                    best_loss = epoch_loss
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                
                 # Atualizar status a cada época
-                self.log_area.append(f"Época {epoch+1}/{epochs} - Loss: {epoch_loss:.4f}")
+                status_msg = f"Época {epoch+1}/{epochs} - Loss: {epoch_loss:.4f}"
+                print(f"\r{status_msg}", end="", flush=True)  # Mostrar no terminal
+                self.log_area.setText(status_msg)  # Apenas época e loss atual
                 # Atualizar título do gráfico com a época e loss atual
-                self.ax_network.set_title(f"Época {epoch+1}/{epochs} - Loss: {epoch_loss:.4f}", fontsize=10)
+                self.ax_network.set_title(status_msg, fontsize=12, pad=10)
+                # Atualizar visualização da rede com os pesos atuais
+                self._update_graph(show_weights=True)
+                self.canvas.draw()
+                
+                # Early stopping
+                if patience_counter >= patience:
+                    self.log_area.setText(f"Early stopping na época {epoch+1} - Loss não melhorou por {patience} épocas")
+                    break
             
-            # Avaliar no conjunto de treino
+            # Avaliar no conjunto de treino e teste
             train_loss, train_accuracy = self.mlp.evaluate(X_train, y_train)
-            self.log_area.append("Resultados no conjunto de treino:")
-            self.log_area.append(f"Loss: {train_loss:.4f}, Acurácia: {train_accuracy:.2%}")
-            
-            # Avaliar no conjunto de teste
             test_loss, test_accuracy = self.mlp.evaluate(X_test, y_test)
-            self.log_area.append("Resultados no conjunto de teste:")
-            self.log_area.append(f"Loss: {test_loss:.4f}, Acurácia: {test_accuracy:.2%}")
+            
+            # Atualizar visualização final com os resultados
+            final_status = f"Treinamento concluído - Loss final: {test_loss:.4f}"
+            self.log_area.setText(final_status)
+            
+            # Criar pasta para esta execução
+            runs_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'runs')
+            if not os.path.exists(runs_dir):
+                os.makedirs(runs_dir)
+            
+            # Encontrar próximo número de execução
+            existing_runs = [int(d.replace('run_', '')) for d in os.listdir(runs_dir) 
+                           if os.path.isdir(os.path.join(runs_dir, d)) and d.startswith('run_')]
+            next_run = max(existing_runs + [0]) + 1
+            run_dir = os.path.join(runs_dir, f'run_{next_run}')
+            os.makedirs(run_dir)
+            
+            # Salvar gráfico de loss
+            loss_path = os.path.join(run_dir, 'loss_history.png')
+            plt.savefig(loss_path, dpi=300, bbox_inches='tight')
+            self.log_area.append(f"\nGráfico de loss salvo em: {loss_path}")
             
             # Salvar modelo se selecionado
             if self.save_model_cb.isChecked():
                 try:
-                    save_path, _ = QFileDialog.getSaveFileName(
-                        self, "Salvar Modelo", "", "Model Files (*.pkl)")
-                    if save_path:
-                        if not save_path.endswith('.pkl'):
-                            save_path += '.pkl'
-                        self.mlp.save_model(save_path)
-                        self.log_area.append(f"Modelo salvo em: {save_path}")
+                    model_path = os.path.join(run_dir, 'model.pkl')
+                    self.mlp.save_model(model_path)
+                    self.log_area.append(f"Modelo salvo em: {model_path}")
                 except Exception as e:
                     self.log_area.append(f"Erro ao salvar modelo: {str(e)}")
             
@@ -569,7 +587,6 @@ class MLPVisualizer(QMainWindow):
                 for idx in indices:
                     inputs = X[idx]
                     pred = self.mlp.predict(inputs.unsqueeze(0))
-                    target = y[idx]
                     
                     original_input = self.df[input_cols].iloc[idx]
                     original_target = self.df[output_cols].iloc[idx]
@@ -653,28 +670,28 @@ class MLPVisualizer(QMainWindow):
             if show_weights and hasattr(edge, 'weight'):
                 weight = float(edge.weight)
                 # Normalizar peso para cor (vermelho para negativo, azul para positivo)
-                color = 'red' if weight < 0 else 'blue'
-                alpha = min(abs(weight), 1.0)  # Transparência baseada no valor absoluto
+                color = '#FF6B6B' if weight < 0 else '#4D96FF'  # Cores mais suaves
                 edge_colors.append(color)
-                widths.append(1 + 2 * abs(weight))  # Espessura baseada no valor absoluto
-                edge_labels[(edge.source.id, edge.target.id)] = f"{weight:.2f}"
+                widths.append(1 + 3 * abs(weight))  # Espessura mais visível
+                edge_labels[(edge.source.id, edge.target.id)] = f"{weight:+.2f}"  # Mostrar sinal
             else:
                 edge_colors.append('gray')
                 widths.append(1.0)
         
         # Desenhar grafo
-        nx.draw_networkx_nodes(G, pos, node_color=colors, node_size=500, ax=self.ax_network)
-        nx.draw_networkx_labels(G, pos, labels=labels, ax=self.ax_network)
+        nx.draw_networkx_nodes(G, pos, node_color=colors, node_size=1500, ax=self.ax_network)
+        nx.draw_networkx_labels(G, pos, labels=labels, ax=self.ax_network, font_size=10, font_weight='bold')
         
         # Desenhar arestas com cores e espessuras diferentes
         nx.draw_networkx_edges(G, pos, edgelist=edges, edge_color=edge_colors,
                              width=widths, ax=self.ax_network, arrowsize=20,
-                             alpha=0.6)  # Deixar arestas semitransparentes
+                             alpha=0.8)  # Arestas mais visíveis
         
-        # Mostrar pesos nas arestas se solicitado
+        # Mostrar pesos nas arestas com fundo branco
         if show_weights:
             nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, 
-                                       ax=self.ax_network, font_size=8)
+                                       ax=self.ax_network, font_size=9,
+                                       bbox=dict(facecolor='white', edgecolor='none', alpha=0.7))
         
         # Adicionar título com a loss atual
         if hasattr(self, 'loss_label'):
